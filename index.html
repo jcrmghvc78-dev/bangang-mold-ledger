@@ -409,12 +409,14 @@ function loadDB(){
   /* 本地工具四个表都可编辑（兼容旧缓存/导入数据缺 editable 标记的情况） */
   DB.sheets.forEach(s => { s.editable = true; });
   // 确保每个标签页都有状态
+  if(!ui.newRows) ui.newRows = {};
   DB.sheets.forEach(s => {
     if(!ui.q[s.id]) ui.q[s.id] = '';
     if(!ui.filters[s.id]) ui.filters[s.id] = [];
     if(!ui.hidden[s.id]) ui.hidden[s.id] = new Set();
     if(!ui.sel[s.id]) ui.sel[s.id] = new Set();
     if(!ui.sort[s.id]) ui.sort[s.id] = null;
+    if(!ui.newRows[s.id]) ui.newRows[s.id] = new Set();
   });
 }
 
@@ -647,20 +649,34 @@ function escHtml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+/* ================= 空白行过滤 ================= */
+function isBlankRow(r){
+  if(!r || !r.length) return true;
+  return r.every(v => String(v === null || v === undefined ? '' : v).trim() === '');
+}
+function visibleRows(s){
+  const all = filteredRows(s);
+  const fresh = ui.newRows[s.id] || new Set();
+  return all.filter(x => !(isBlankRow(x.r) && !fresh.has(x.i)));
+}
+
 /* ================= 渲染：元信息与分页 ================= */
 function renderMeta(){
   const s = sheetById(ui.tab);
   if(!s){ document.getElementById('meta').innerHTML = ''; return; }
   const all = filteredRows(s);
+  const visible = visibleRows(s);
   const total = s.rows.length;
+  const hiddenBlank = all.length - visible.length;
   const size = PAGE_SIZES[s.id] || 50;
-  const pages = Math.max(1, Math.ceil(all.length / size));
+  const pages = Math.max(1, Math.ceil(visible.length / size));
   if(ui.page[s.id] > pages) ui.page[s.id] = pages;
   const p = ui.page[s.id];
   const selN = (ui.sel[s.id] || new Set()).size;
   const hiddenN = ui.hidden[s.id].size;
   let html = `<span>共 <b>${total}</b> 条记录</span>`;
   if(all.length !== total) html += `<span>筛选出 <b>${all.length}</b> 条</span>`;
+  if(hiddenBlank) html += `<span style="color:var(--ink3)">已隐藏 ${hiddenBlank} 条空白记录</span>`;
   if(hiddenN) html += `<span style="color:var(--ink3)">已隐藏 ${hiddenN} 列</span>`;
   if(selN) html += `<span style="color:var(--accent)">已选 ${selN} 条</span>`;
   html += `<div class="pager">
@@ -682,11 +698,11 @@ function renderTable(){
   if(!s){ wrap.innerHTML = ''; return; }
   const hidden = ui.hidden[s.id];
   const cols = s.headers.map((_, i) => i).filter(i => !hidden.has(i));
-  const all = filteredRows(s);
+  const visible = visibleRows(s);
   const size = PAGE_SIZES[s.id] || 50;
-  const pages = Math.max(1, Math.ceil(all.length / size));
+  const pages = Math.max(1, Math.ceil(visible.length / size));
   const p = Math.min(ui.page[s.id], pages);
-  const pageRows = all.slice((p - 1) * size, p * size);
+  const pageRows = visible.slice((p - 1) * size, p * size);
   const sort = ui.sort[s.id];
   const sel = ui.sel[s.id];
 
@@ -861,6 +877,7 @@ function addRow(sid){
     newRow[0] = mx + 1;
   }
   s.rows.push(newRow);
+  ui.newRows[sid].add(s.rows.length - 1);
   ui.page[sid] = Math.max(1, Math.ceil(s.rows.length / (PAGE_SIZES[sid] || 50)));
   markDirty(); saveDB(); renderAll();
   toast('已新增一行，双击单元格即可填写');
@@ -1110,8 +1127,8 @@ function importExcel(file){
           });
           DB.sheets.forEach(s => { s.editable = true; });
           ui.page = { main: 1, moke: 1, cust: 1, storage: 1 };
-          ui.sel = {}; ui.hidden = {}; ui.sort = {};
-          DB.sheets.forEach(s => { ui.hidden[s.id] = new Set(); ui.sel[s.id] = new Set(); ui.sort[s.id] = null; ui.q[s.id] = ''; });
+          ui.sel = {}; ui.hidden = {}; ui.sort = {}; ui.newRows = {};
+          DB.sheets.forEach(s => { ui.hidden[s.id] = new Set(); ui.sel[s.id] = new Set(); ui.sort[s.id] = null; ui.q[s.id] = ''; ui.newRows[s.id] = new Set(); });
           markDirty(); saveDB(); renderAll();
           toast(skipped.length ? `导入完成（跳过：${skipped.join('、')}）` : '导入完成', 'ok');
         });
@@ -1214,7 +1231,7 @@ const HELP_HTML = `
 </ul>
 <h4>查询</h4>
 <ul>
-  <li>顶部搜索框：按任意字段模糊搜索（模号、花纹、厂家、规格、日期等）；</li>
+  <li>顶部搜索框：按任意字段模糊搜索（模号、花纹、厂家、规格、日期等）；整行全空的记录自动隐藏（底部统计会注明），新添加的空行不受影响；</li>
   <li>筛选：选择列和值后点「+ 筛选」，可叠加多个条件，点 × 移除；</li>
   <li>点击表头按该列排序（再点切换升/降序），「列设置」可隐藏不常用的列。</li>
 </ul>
@@ -1279,8 +1296,8 @@ function init(){
       DB = deepClone(SOURCE_DATA);
       DB.sheets.forEach(normalizeRows);
       ui.page = { main: 1, moke: 1, cust: 1, storage: 1 };
-      ui.sel = {}; ui.hidden = {}; ui.sort = {};
-      DB.sheets.forEach(s => { ui.hidden[s.id] = new Set(); ui.sel[s.id] = new Set(); ui.sort[s.id] = null; ui.q[s.id] = ''; });
+      ui.sel = {}; ui.hidden = {}; ui.sort = {}; ui.newRows = {};
+      DB.sheets.forEach(s => { ui.hidden[s.id] = new Set(); ui.sel[s.id] = new Set(); ui.sort[s.id] = null; ui.q[s.id] = ''; ui.newRows[s.id] = new Set(); });
       saveDB(true);
       renderAll();
       toast('已恢复初始数据', 'ok');
